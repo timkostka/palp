@@ -14,11 +14,14 @@ from point2d import Point2D
 class Layout:
     """A Layout contains all placement information."""
 
+    # penalty factor on intersecting labels
+    penalty_intersection = 1000.0
+
     # penalty factor on keepout zones
-    penalty = 10.0
+    penalty_keepout = 1000000.0
 
     # perturbation distance when getting gradient
-    delta = 0.01
+    delta = 1e-8
 
     def __init__(self):
         # list of labels
@@ -29,6 +32,7 @@ class Layout:
         self.labels.append(Label(Point2D(1.0, 0.0), 3, 1, 'one'))
         self.labels.append(Label(Point2D(2.0, 0.6), 3, 1, 'two'))
         self.labels.append(Label(Point2D(1.5, 1.0), 5, 1, 'three'))
+        self.labels.append(Label(Point2D(-1, -1.0), 2, 2, 'four'))
         # add a keeopouts
         self.keepouts.append(Label(Point2D(-0.2, 0.5), 0.6, 0.6))
 
@@ -78,10 +82,20 @@ class Layout:
         # draw labels
         for label in self.labels:
             rect = label.get_rectangle()
+            # draw outline
             graph.DrawRectangle([rect.bottom_left.x, rect.top_right.y],
                                 [rect.top_right.x, rect.bottom_left.y],
                                 None,
                                 'black')
+            # draw distance from optimal
+            graph.DrawLine([label.location.x, label.location.y],
+                           [label.optimal.x, label.optimal.y],
+                           'blue')
+            # draw optimal distance
+            graph.DrawCircle([label.optimal.x, label.optimal.y],
+                             5.0,
+                             None,
+                             'blue')
         # draw keepouts
         for keepout in self.keepouts:
             rect = keepout.get_rectangle()
@@ -107,14 +121,14 @@ class Layout:
                 if verbose and this_dist:
                     print('- overlap between %d and %d by %g'
                           % (i, j, this_dist))
-                cost += self.penalty * this_dist ** 2
+                cost += self.penalty_intersection * this_dist ** 2
         # add cost due to intersection with keepouts
         for i in range(len(self.labels)):
             one = self.labels[i].get_rectangle()
             for j in range(len(self.keepouts)):
-                two = self.labels[j].get_rectangle()
+                two = self.keepouts[j].get_rectangle()
                 this_dist = one.overlap_with(two)
-                cost += self.penalty * this_dist ** 2
+                cost += self.penalty_keepout * this_dist ** 2
                 if verbose and this_dist:
                     print('- keepout violation on %d and %d by %g'
                           % (i, j, this_dist))
@@ -145,11 +159,13 @@ class Layout:
         # minimum distance to move
         min_movement = 1e-6
         # maximum distance to move a label per iteration
-        max_movement = 0.25
-        # maximum error on each movement
-        max_error = 0.5
+        max_movement = 0.1
         # maximum iterations
         max_iteration_count = 100
+        # last movement amount
+        movement = max_movement
+        # movement amount cutback
+        movement_cutback = 0.5
         # number of unknowns
         unknown_count = len(self.labels) * 2
         # store directions of steepest descent for each iteration
@@ -177,37 +193,45 @@ class Layout:
             if dcost_norm == 0.0:
                 print('WARNING: Reached local minimum')
                 break
+            print(dcost)
             dcost = [-x / dcost_norm for x in dcost]
+            # save path
+            descent_vectors.append(dcost)
+            # get tangency
+            tangency = 0.0
+            if len(descent_vectors) >= 2:
+                tangency = sum(x * y
+                               for x, y
+                               in zip(descent_vectors[-2], descent_vectors[-1]))
+                print('- tangency=%g' % tangency)
+            if iteration > 0 and tangency < 0.9:
+                movement *= movement_cutback
+                print('- cutback due to tangency')
+            if tangency > 0.95:
+                movement *= 2.0
+                movement = min(movement, max_movement)
             print('- dphi = %s' % dcost)
-            # maximum error allowed
-            low = min_movement
-            high = max_movement
-            test = (low + high) / 2.0
-            while low < test < high:
+            while True:
+                # move this much
                 for i in range(len(unknowns)):
-                    self.adjust_unknown(i, test * dcost[i])
+                    self.adjust_unknown(i, movement * dcost[i])
                 new_cost = self.get_cost()
-                for i in range(len(unknowns)):
-                    self.restore_unknown(i, unknowns)
-                est_delta = -dcost_norm * test
-                est_cost = starting_cost + est_delta
-                actual_delta = new_cost - starting_cost
-                assert est_delta != 0.0
-                error = 1.0 - actual_delta / est_delta
-                # print(test, error)
-                if abs(error) > max_error:
-                    high = test
-                else:
-                    low = test
-                test = (low + high) / 2.0
-            if test < min_movement:
+                # if new cost is higher, cutback
+                if new_cost >= starting_cost:
+                    movement *= movement_cutback
+                    print('- cutback due to increased cost')
+                    for i in range(len(unknowns)):
+                        self.restore_unknown(i, unknowns)
+                    if movement <= min_movement:
+                        movement = 0.0
+                        break
+                    continue
+                break
+            print('- moved by %g' % movement)
+            if movement <= min_movement:
                 print('minimum movement after %d iterations' % iteration)
                 break
-            # make the change
-            for i in range(len(unknowns)):
-                self.adjust_unknown(i, test * dcost[i])
-            print('- moved by %g' % test)
-            self.draw()
+            #self.draw()
 
 
 class Label:
@@ -215,7 +239,7 @@ class Label:
 
     def __init__(self, optimal=Point2D(), width=0.0, height=0.0, text=''):
         self.optimal = optimal
-        self.location = optimal
+        self.location = copy.copy(optimal)
         self.width = width
         self.height = height
         self.text = text
@@ -300,5 +324,9 @@ class Rectangle:
 
 
 problem = Layout()
-problem.draw()
+#problem.draw()
 problem.anneal()
+
+print('\n\n\n')
+problem.get_cost(verbose=True)
+problem.draw()
